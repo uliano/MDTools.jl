@@ -1,7 +1,5 @@
 import Base: show
 using StaticArrays
-using OffsetArrays: Origin
-
 
 mutable struct BitBuffer
     bits::Vector{UInt8}  # the bytes
@@ -20,33 +18,30 @@ mutable struct XtcFile
     file::IOStream
     filename::AbstractString
     mode::AbstractString
+    # following are all buffers used for read write process
     buffer::BitBuffer
+    magicints::Vector{UInt32}
     thiscoord::MVector{3, Int32}
     prevcoord::MVector{3, Int32}
+    # relvant infos
     natoms::Int32
     nframes::Int32
     steps::Vector{Int32}
     offsets::Vector{UInt64}
     time::Vector{Float32}
-    magicints::Vector{UInt32}
-    FIRSTINDEX::Int
-    LASTINDEX::Int
     function XtcFile(name::AbstractString, mode::AbstractString)
         file = open(name, mode)
         magicints = [UInt32(floor(2^i)) for i in 0:1//3:24]
         magicints[1:9] .= 0
-        FIRSTINDEX = 9
-        LASTINDEX = length(magicints)
         if 'r' in mode || 'a' in mode
             stuff = read_xtc_headers(file)
             buf = BitBuffer(stuff.natoms * 4)
-            XF = new(file, name, mode, buf, [Int32(0) for _ in 1:3], [Int32(0) for _ in 1:3],
-                     stuff.natoms, length(stuff.offsets), stuff.steps, stuff.offsets,
-                     stuff.times, magicints, FIRSTINDEX, LASTINDEX)
+            XF = new(file, name, mode, buf, magicints, [Int32(0) for _ in 1:3], [Int32(0) for _ in 1:3],
+                     stuff.natoms, length(stuff.offsets), stuff.steps, stuff.offsets, stuff.times)
         else
             buf = BitBuffer(2^16)
-            XF = new(file, name, mode, buf, [Int32(0) for _ in 1:3], [Int32(0) for _ in 1:3],
-                     0, 0, Int32[], UInt64[], Float32[], magicints, FIRSTINDEX, LASTINDEX)
+            XF = new(file, name, mode, buf, magicints, [Int32(0) for _ in 1:3], [Int32(0) for _ in 1:3],
+                     0, 0, Int32[], UInt64[], Float32[])
         end
         closeme(xf) = close(xf.file)
         finalizer(closeme, XF)
@@ -341,8 +336,6 @@ function sizeofints(sizes::AbstractVector{UInt32})
     return nbits
 end
 
-
-
 function read_xtc_headers(file)
     times = Float32[]
     steps = Int32[]
@@ -381,46 +374,8 @@ function read_xtc_header(file; skip_to_next=false)
     return (; natoms, step, time, offset)
 end
 
-function read_xtc_data(file, offset)
-    
-    box = Matrix{Float32}(undef, 3, 3)
-    minint = Vector{Int32}(undef, 3)
-    maxint = Vector{Int32}(undef, 3)
-
-    seek(file, offset)
-    for i in 1:3
-        for j in 1:3
-            box[i, j] = ntoh(read(file, Float32))
-        end
-    end
-    natoms = ntoh(read(file, Int32))
-    coords = Matrix{Float32}(undef, natoms, 3)
-    if natoms <= 9
-        for j in 1:3
-            for i in 1:natoms
-                fcoords[i, j] = ntoh(read(file, Float32))
-            end
-        end
-    else
-        precision = ntoh(read(file, Float32)) 
-        if precision == 0
-            # remember to throw error
-        end
-        read!(file, minint)
-        minint .= ntoh.(minint)
-        read!(file, maxint)
-        maxint .= ntoh.(maxint)
-        smallidx = ntoh(read(file, Int32))
-        nbytes = ntoh(read(file, Int32))
-        bytes = Array{UInt8}(undef, nbytes)
-        read!(file, bytes)
-        bits = BitBuffer(bytes)
-    end
-    return (; coords, box)
-end
-
-function read_xtc_box(file::XtcFile, index:Integer)
-    seek(file.file, file.offsets[i])
+function read_xtc_box(file::XtcFile, frame::Integer)
+    seek(file.file, file.offsets[frame])
     box = Matrix{Float32}(undef, 3, 3)
     for i in 1:3
         for j in 1:3
@@ -430,17 +385,14 @@ function read_xtc_box(file::XtcFile, index:Integer)
     return box
 end
 
-function read_xtc_atoms(file::XtcFile, index::Integer, coords::AbstractMatrix{T}) where {T<: Real}
+function read_xtc_atoms(file::XtcFile, frame::Integer, coords::AbstractMatrix{T}) where {T<: Real}
     local smallnum::Int32
     local smaller::Int32
     minint = MVector{3, Int32}(undef)
     maxint = MVector{3, Int32}(undef)
-    # thiscoord = MVector{3, Int32}(undef)
-    # prevcoord = MVector{3, Int32}(undef)
     magicints = file.magicints
-    FIRSTINDEX = file.FIRSTINDEX
-    LASTINDEX = file.LASTINDEX
-    seek(file.file, file.offsets[index] + 36) # we don't read box here
+    FIRSTINDEX = 9
+    seek(file.file, file.offsets[frame] + 36) # we don't read box here
     size = ntoh(read(file.file, Int32))
     if size <= 9
         for j in 1:3
@@ -544,12 +496,11 @@ function read_xtc_atoms(file::XtcFile, index::Integer, coords::AbstractMatrix{T}
     return nothing      
 end
 
-
 function read_xtc_file(name)
     xtcfile = XtcFile(name, "r")
     coordinates = Array{Float32}(undef, 3, xtcfile.natoms, xtcfile.nframes)
-    for i in 1:xtcfile.nframes
-        read_xtc_atoms(xtcfile, i, view(coordinates, :, :, i))
+    for frame in 1:xtcfile.nframes
+        read_xtc_atoms(xtcfile, frame, view(coordinates, :, :, i))
     end
     return coordinates
 end
