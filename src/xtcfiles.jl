@@ -21,8 +21,8 @@ mutable struct XtcFile
     filename::AbstractString
     mode::AbstractString
     buffer::BitBuffer
-    thiscoord::Int32
-    prevcoord::Int32
+    thiscoord::MVector{3, Int32}
+    prevcoord::MVector{3, Int32}
     natoms::Int32
     nframes::Int32
     steps::Vector{Int32}
@@ -40,36 +40,23 @@ mutable struct XtcFile
         if 'r' in mode || 'a' in mode
             stuff = read_xtc_headers(file)
             buf = BitBuffer(stuff.natoms * 4)
-            XF = new(file, name, mode, buf, 0, 0, stuff.natoms, length(stuff.offsets), stuff.steps,
-                stuff.offsets, stuff.times, magicints, FIRSTINDEX, LASTINDEX)
+            XF = new(file, name, mode, buf, [Int32(0) for _ in 1:3], [Int32(0) for _ in 1:3],
+                     stuff.natoms, length(stuff.offsets), stuff.steps, stuff.offsets,
+                     stuff.times, magicints, FIRSTINDEX, LASTINDEX)
         else
             buf = BitBuffer(2^16)
-            XF = new(file, name, mode, buf, 0, 0, 0, 0, Int32[], UInt64[], Float32[],
-                magicints, FIRSTINDEX, LASTINDEX)
+            XF = new(file, name, mode, buf, [Int32(0) for _ in 1:3], [Int32(0) for _ in 1:3],
+                     0, 0, Int32[], UInt64[], Float32[], magicints, FIRSTINDEX, LASTINDEX)
         end
         closeme(xf) = close(xf.file)
         finalizer(closeme, XF)
     end
 end
 
-function buffer2c!(julia::BitBuffer, c::Array{Cint})
-    c[1] = 0
-    c[2] = 0
-    c[3] = 0
-    for i in 0:length(julia.bits) ÷ 4
-        index = 1 + i * 4
-        if index > length(julia.bits) break end
-        c[i+4] = Int32(julia.bits[index]) << 0
-        index += 1
-        if index > length(julia.bits) break end
-        c[i+4] |= Int32(julia.bits[index]) << 8
-        index += 1
-        if index > length(julia.bits) break end
-        c[i+4] |= Int32(julia.bits[index]) << 16
-        index += 1
-        if index > length(julia.bits) break end
-        c[i+4] |= Int32(julia.bits[index]) << 24
-    end
+function show(io::IO, xf::XtcFile)
+    result = "XtcFile(\"$(xf.filename)\" open for \"$(xf.mode)\" "
+    result *= "$(xf.nframes) frames with $(xf.natoms) atoms each)"
+    println(io, result)
 end
 
 function show(io::IO, buffer::BitBuffer) 
@@ -450,7 +437,8 @@ function read_xtc_data(file, offset)
     return (; coords, box)
 end
 
-function read_xtc_box(file)
+function read_xtc_box(file::XtcFile, index:Integer)
+    seek(file.file, file.offsets[i])
     box = Matrix{Float32}(undef, 3, 3)
     for i in 1:3
         for j in 1:3
@@ -460,36 +448,41 @@ function read_xtc_box(file)
     return box
 end
 
-function read_xtc_frame(file, natoms::Integer, coords::AbstractMatrix{T}, magicints::Vector{UInt32}, buffer::BitBuffer) where {T<: Real}
+function read_xtc_atoms(file::XtcFile, index::Integer, coords::AbstractMatrix{T}) where {T<: Real}
     local smallnum::Int32
     local smaller::Int32
     minint = MVector{3, Int32}(undef)
     maxint = MVector{3, Int32}(undef)
-    thiscoord = MVector{3, Int32}(undef)
-    prevcoord = MVector{3, Int32}(undef)
-    skip(file, 36) # box is read by another method
-    size = ntoh(read(file, Int32))
+    # thiscoord = MVector{3, Int32}(undef)
+    # prevcoord = MVector{3, Int32}(undef)
+    magicints = file.magicints
+    FIRSTINDEX = file.FIRSTINDEX
+    LASTINDEX = file.LASTINDEX
+    seek(file.file, file.offsets[index] + 36) # we don't read box here
+    size = ntoh(read(file.file, Int32))
     if size <= 9
         for j in 1:3
             for i in 1:size
-                coords[i, j] = ntoh(read(file, Float32))
+                coords[i, j] = ntoh(read(file.file, Float32))
             end
         end
     else
-        precision = ntoh(read(file, Float32))
-        read!(file, minint)
+        precision = ntoh(read(file.file, Float32))
+        read!(file.file, minint)
         minint .= ntoh.(minint)
-        read!(file, maxint)
+        read!(file.file, maxint)
         maxint .= ntoh.(maxint)
-        smallidx = ntoh(read(file, Int32))
+        smallidx = ntoh(read(file.file, Int32))
         smaller = magicints[max(FIRSTINDEX, smallidx - 1) + 1] >>> 1 % Int32
         smallnum = magicints[smallidx + 1] >>> 1 % Int32
         sizesmall = SA[magicints[smallidx + 1], magicints[smallidx + 1], magicints[smallidx + 1]]
-        nbytes = ntoh(read(file, Int32))
-        nskip = cld(nbytes, 4) * 4
-        buffer.index = 1
-        buffer.offset = 0
-        readbytes!(file, buffer.bits, nbytes)
+        nbytes = ntoh(read(file.file, Int32))
+        if length(file.buffer.bits) < nbytes
+            resize!(file.buffer.bits, nbytes)
+        end
+        file.buffer.index = 1
+        file.buffer.offset = 0
+        readbytes!(file.file, file.buffer.bits, nbytes)
         sizeint = SA[(maxint[1] - minint[1] + 1) % UInt32,
                     (maxint[2] - minint[2] + 1) % UInt32,
                     (maxint[3] - minint[3] + 1) % UInt32]
@@ -501,52 +494,52 @@ function read_xtc_frame(file, natoms::Integer, coords::AbstractMatrix{T}, magici
         end
         i = 1 # atom index
         run = zero(Int32)
-        while i <= natoms
+        while i <= file.natoms
             if bitsize == 0
                 for ii in 1:3
-                    thiscoord[ii] = receivebits!(buffer, bitsizeint[ii])
+                    file.thiscoord[ii] = receivebits!(file.buffer, bitsizeint[ii])
                 end
             else
-                receiveints!(buffer, bitsize, sizeint, thiscoord)
+                receiveints!(file.buffer, bitsize, sizeint, file.thiscoord)
             end
             for ii in 1:3
-                thiscoord[ii] += minint[ii]
+                file.thiscoord[ii] += minint[ii]
             end
-            flag = receivebits!(buffer, 1)
+            flag = receivebits!(file.buffer, 1)
             is_smaller = zero(Int32)
             if flag == 1
-                run = receivebits!(buffer, 5)
+                run = receivebits!(file.buffer, 5)
                 is_smaller = run % 3 % Int32
                 run -= is_smaller
                 is_smaller -= one(Int32)
             end
             if run == 0
                 for ii in 1:3
-                    coords[i,ii] = thiscoord[ii] / precision 
+                    coords[ii, i] = file.thiscoord[ii] / precision 
                 end
                 i += 1
             else
                 for ii in 1:3
-                    prevcoord[ii] = thiscoord[ii]
+                    file.prevcoord[ii] = file.thiscoord[ii]
                 end
                 for k in 1:3:run
-                    receiveints!(buffer, smallidx, sizesmall, thiscoord)
+                    receiveints!(file.buffer, smallidx, sizesmall, file.thiscoord)
                     for ii in 1:3
-                        thiscoord[ii] += prevcoord[ii] - smallnum # smallnum ??? WTF!!
+                        file.thiscoord[ii] += file.prevcoord[ii] - smallnum # smallnum ??? WTF!!
                     end
                     if k == 1 # exchange first with second atom WTF!!
-                        thiscoord, prevcoord = prevcoord, thiscoord
+                        file.thiscoord, file.prevcoord = file.prevcoord, file.thiscoord
                         for ii in 1:3
-                            coords[i,ii] = prevcoord[ii] / precision
+                            coords[ii,i] = file.prevcoord[ii] / precision
                         end
                         i += 1
                     else
                         for ii in 1:3
-                            prevcoord[ii] = thiscoord[ii]
+                            file.prevcoord[ii] = file.thiscoord[ii]
                         end
                     end
                     for ii in 1:3
-                        coords[i,ii] = thiscoord[ii] / precision
+                        coords[ii,i] = file.thiscoord[ii] / precision
                     end
                     i += 1
                 end
@@ -571,15 +564,10 @@ end
 
 
 function read_xtc_file(name)
-    xtcfile = open(name, "r")
-    index = read_xtc_headers(xtcfile)
-    nframes = length(index.offsets)
-    coordinates = Array{Float32}(undef, index.natoms, 3, nframes )
-    buffer = BitBuffer(Int(ceil(index.natoms * 4)))
-    for i in 1:nframes
-        #println(i)
-        seek(xtcfile, index.offsets[i])
-        read_xtc_frame(xtcfile, index.natoms, view(coordinates, :, :, i), magicints, buffer)
+    xtcfile = XtcFile(name, "r")
+    coordinates = Array{Float32}(undef, 3, xtcfile.natoms, xtcfile.nframes)
+    for i in 1:xtcfile.nframes
+        read_xtc_atoms(xtcfile, i, view(coordinates, :, :, i))
     end
     return coordinates
 end
@@ -589,9 +577,9 @@ end
 
 #@code_warntype 
 #@time read_xtc_file("step5_2.xtc");
-# @time cc=read_xtc_file("md_adam_g0_amber_rep1.xtc");
+@time cc=read_xtc_file("md_adam_g0_amber_rep1.xtc");
 #cc=read_xtc_file("diala_nowat.xtc");
 
 #@time read_xtc_file("step5_2.xtc");
 
-xf = XtcFile("diala_nowat.xtc", "r")
+#xf = XtcFile("diala_nowat.xtc", "r")
