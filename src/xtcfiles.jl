@@ -1,8 +1,7 @@
 import Base: show
 using StaticArrays
 using OffsetArrays: Origin
-using  Libdl
-lib = Libdl.dlopen("./test/libclib.so")
+
 
 mutable struct BitBuffer
     bits::Vector{UInt8}  # the bytes
@@ -14,6 +13,42 @@ mutable struct BitBuffer
     end 
     function BitBuffer(n)
         new(Vector{UInt8}(undef, n), 1, 0)
+    end
+end
+
+mutable struct XtcFile
+    file::IOStream
+    filename::AbstractString
+    mode::AbstractString
+    buffer::BitBuffer
+    thiscoord::Int32
+    prevcoord::Int32
+    natoms::Int32
+    nframes::Int32
+    steps::Vector{Int32}
+    offsets::Vector{UInt64}
+    time::Vector{Float32}
+    magicints::Vector{UInt32}
+    FIRSTINDEX::Int
+    LASTINDEX::Int
+    function XtcFile(name::AbstractString, mode::AbstractString)
+        file = open(name, mode)
+        magicints = [UInt32(floor(2^i)) for i in 0:1//3:24]
+        magicints[1:9] .= 0
+        FIRSTINDEX = 9
+        LASTINDEX = length(magicints)
+        if 'r' in mode || 'a' in mode
+            stuff = read_xtc_headers(file)
+            buf = BitBuffer(stuff.natoms * 4)
+            XF = new(file, name, mode, buf, 0, 0, stuff.natoms, length(stuff.offsets), stuff.steps,
+                stuff.offsets, stuff.times, magicints, FIRSTINDEX, LASTINDEX)
+        else
+            buf = BitBuffer(2^16)
+            XF = new(file, name, mode, buf, 0, 0, 0, 0, Int32[], UInt64[], Float32[],
+                magicints, FIRSTINDEX, LASTINDEX)
+        end
+        closeme(xf) = close(xf.file)
+        finalizer(closeme, XF)
     end
 end
 
@@ -204,7 +239,7 @@ function sendints!(buffer::BitBuffer, num_of_bits::Integer, sizes::MVector{3, UI
     return nothing
 end
 
-function receiveints!(buffer::BitBuffer, num_of_bits::Integer, sizes::MVector{3, UInt32}, nums::MVector{3, Int32})
+function receiveints!(buffer::BitBuffer, num_of_bits::Integer, sizes::AbstractVector{UInt32}, nums::AbstractArray{Int32})
     if num_of_bits > 64
         result = zero(UInt128)
 
@@ -306,7 +341,7 @@ function sizeofint(size::Integer)
     return nbits
 end
 
-function sizeofints(sizes::MVector{3, UInt32})
+function sizeofints(sizes::AbstractVector{UInt32})
     product::UInt128 = one(UInt128)
     nbits = zero(UInt32)
     for i in 1:length(sizes)
@@ -411,143 +446,152 @@ function read_xtc_data(file, offset)
         bytes = Array{UInt8}(undef, nbytes)
         read!(file, bytes)
         bits = BitBuffer(bytes)
-
     end
     return (; coords, box)
 end
 
-
-function read_xtc_frame(file, natoms::Integer, magicints::Vector{UInt32})
-    local smallnum::Int32
-    local smaller::Int32
-    box = MMatrix{3, 3, Float32}(undef)
-    minint = MVector{3, Int32}(undef)
-    maxint = MVector{3, Int32}(undef)
-    # magic = ntoh(read(file, Int32))
-    # natoms = ntoh(read(file, Int32))
-    # step = ntoh(read(file, Int32))
-    # time = ntoh(read(file, Float32))
-    read!(file, box)
-    box .= ntoh.(box)
-    box = box'
-    size = ntoh(read(file, Int32))
-    precision = ntoh(read(file, Float32))
-    read!(file, minint)
-    minint .= ntoh.(minint)
-    read!(file, maxint)
-    maxint .= ntoh.(maxint)
-    smallidx = ntoh(read(file, Int32))
-    smaller = magicints[max(FIRSTINDEX, smallidx - 1) + 1] >>> 1 % Int32
-    smallnum = magicints[smallidx + 1] >>> 1 % Int32
-    sizesmall = MVector{3, UInt32}(undef)
-    sizesmall[:] .= magicints[smallidx + 1]
-    nbytes = ntoh(read(file, Int32))
-    nskip = cld(nbytes, 4) * 4
-    buffer = BitBuffer(nskip)
-    read!(file, buffer.bits)
-    # cbuf = Vector{Cint}(undef, nskip ÷ 4 + 3)
-    # buffer2c!(buffer, cbuf)
-    # for i in 1:nskip ÷ 4
-    #     buffer.bits[i], buffer.bits[i+1], buffer.bits[i+2], buffer.bits[i+3] = buffer.bits[i+3], buffer.bits[i+2], buffer.bits[i+1], buffer.bits[i]
-    # end
-    #skip(file, nskip-nbytes) 
-    coords = Matrix{Float32}(undef, natoms, 3)
-    sizeint = (maxint .- minint .+ 1) .% UInt32
-    if any( sizeint .> 0xffffff)
-        bitsizeint = sizeofint.(sizeint)
-        bitsize = zero(UInt32)
-    else    
-        bitsize = sizeofints(sizeint)
+function read_xtc_box(file)
+    box = Matrix{Float32}(undef, 3, 3)
+    for i in 1:3
+        for j in 1:3
+            read!(file, box[i, j])
+        end
     end
-    #println(bitsize, " ", smallidx, " ", sizeint)
-    thiscoord = MVector{3, Int32}(undef) # the original code uses an array but only 1 element is really used
-    prevcoord = MVector{3, Int32}(undef)
-    i = 1 # atom index
-    run = zero(Int32)
-    while i <= natoms
-        #println(smallidx, " ", sizesmall)
-        j = 1 # run index
-        if bitsize == 0
-            # ensure order, you never know what the compiler does
-            thiscoord[1] = receivebits!(buffer, bitsizeint[1])
-            thiscoord[2] = receivebits!(buffer, bitsizeint[2])
-            thiscoord[3] = receivebits!(buffer, bitsizeint[3])
-        else
-            #ccall(rec, Cvoid, (Ptr{Cint}, Cint, Cint, Ptr{Cuint}, Ptr{Cint}), cbuf, 3, bitsize, sizeint, thiscoord)
-            receiveints!(buffer, bitsize, sizeint, thiscoord)
-        end
-        thiscoord += minint
-        # flag = ccall(rec, Cint, (Ptr{Cint}, Cint), cbuf, 1)
-        flag = receivebits!(buffer, 1)
-        is_smaller = zero(Int32)
-        if flag == 1
-            # run = ccall(rec, Cint, (Ptr{Cint}, Cint), cbuf, 5)
-            run = receivebits!(buffer, 5)
-            is_smaller = run % 3 % Int32
-            run -= is_smaller
-            is_smaller -= one(Int32)
-        end
-        if run == 0
-            coords[i,:] = thiscoord ./ precision 
-            i += 1
-        else
-            prevcoord = thiscoord
-            for k in 1:3:run
-                # ccall(rec, Cvoid, (Ptr{Cint}, Cint, Cint, Ptr{Cuint}, Ptr{Cint}), cbuf, 3, bitsize, sizeint, thiscoord)
-                receiveints!(buffer, smallidx, sizesmall, thiscoord)
-                thiscoord += prevcoord .- smallnum # smallnum ??? WTF!!
-                if k == 1 # exchange first with second atom WTF!!
-                    thiscoord, prevcoord = prevcoord, thiscoord
-                    coords[i,:] = prevcoord ./ precision
-                    i += 1
-                else
-                    prevcoord = thiscoord
-                end
-                coords[i,:] = thiscoord ./ precision
-                i += 1
-            end
-        end
-        smallidx += is_smaller;
-        if is_smaller < 0
-            smallnum = smaller
-            if smallidx > FIRSTINDEX 
-                smaller = magicints[smallidx] >>> 1 % Int32
-            else
-                smaller = zero(Int32)
-            end
-        elseif is_smaller > 0
-            smaller = smallnum
-            smallnum = magicints[smallidx + 1] >>> 1 % Int32
-        end
-        sizesmall[:] .= magicints[smallidx + 1]
-    end
-    return box, coords      
+    return box
 end
 
-#println(readdir())
+function read_xtc_frame(file, natoms::Integer, coords::AbstractMatrix{T}, magicints::Vector{UInt32}, buffer::BitBuffer) where {T<: Real}
+    local smallnum::Int32
+    local smaller::Int32
+    minint = MVector{3, Int32}(undef)
+    maxint = MVector{3, Int32}(undef)
+    thiscoord = MVector{3, Int32}(undef)
+    prevcoord = MVector{3, Int32}(undef)
+    skip(file, 36) # box is read by another method
+    size = ntoh(read(file, Int32))
+    if size <= 9
+        for j in 1:3
+            for i in 1:size
+                coords[i, j] = ntoh(read(file, Float32))
+            end
+        end
+    else
+        precision = ntoh(read(file, Float32))
+        read!(file, minint)
+        minint .= ntoh.(minint)
+        read!(file, maxint)
+        maxint .= ntoh.(maxint)
+        smallidx = ntoh(read(file, Int32))
+        smaller = magicints[max(FIRSTINDEX, smallidx - 1) + 1] >>> 1 % Int32
+        smallnum = magicints[smallidx + 1] >>> 1 % Int32
+        sizesmall = SA[magicints[smallidx + 1], magicints[smallidx + 1], magicints[smallidx + 1]]
+        nbytes = ntoh(read(file, Int32))
+        nskip = cld(nbytes, 4) * 4
+        buffer.index = 1
+        buffer.offset = 0
+        readbytes!(file, buffer.bits, nbytes)
+        sizeint = SA[(maxint[1] - minint[1] + 1) % UInt32,
+                    (maxint[2] - minint[2] + 1) % UInt32,
+                    (maxint[3] - minint[3] + 1) % UInt32]
+        if any( sizeint .> 0xffffff)
+            bitsizeint = sizeofint.(sizeint)
+            bitsize = zero(UInt32)
+        else    
+            bitsize = sizeofints(sizeint)
+        end
+        i = 1 # atom index
+        run = zero(Int32)
+        while i <= natoms
+            if bitsize == 0
+                for ii in 1:3
+                    thiscoord[ii] = receivebits!(buffer, bitsizeint[ii])
+                end
+            else
+                receiveints!(buffer, bitsize, sizeint, thiscoord)
+            end
+            for ii in 1:3
+                thiscoord[ii] += minint[ii]
+            end
+            flag = receivebits!(buffer, 1)
+            is_smaller = zero(Int32)
+            if flag == 1
+                run = receivebits!(buffer, 5)
+                is_smaller = run % 3 % Int32
+                run -= is_smaller
+                is_smaller -= one(Int32)
+            end
+            if run == 0
+                for ii in 1:3
+                    coords[i,ii] = thiscoord[ii] / precision 
+                end
+                i += 1
+            else
+                for ii in 1:3
+                    prevcoord[ii] = thiscoord[ii]
+                end
+                for k in 1:3:run
+                    receiveints!(buffer, smallidx, sizesmall, thiscoord)
+                    for ii in 1:3
+                        thiscoord[ii] += prevcoord[ii] - smallnum # smallnum ??? WTF!!
+                    end
+                    if k == 1 # exchange first with second atom WTF!!
+                        thiscoord, prevcoord = prevcoord, thiscoord
+                        for ii in 1:3
+                            coords[i,ii] = prevcoord[ii] / precision
+                        end
+                        i += 1
+                    else
+                        for ii in 1:3
+                            prevcoord[ii] = thiscoord[ii]
+                        end
+                    end
+                    for ii in 1:3
+                        coords[i,ii] = thiscoord[ii] / precision
+                    end
+                    i += 1
+                end
+            end
+            smallidx += is_smaller;
+            if is_smaller < 0
+                smallnum = smaller
+                if smallidx > FIRSTINDEX 
+                    smaller = magicints[smallidx] >>> 1 % Int32
+                else
+                    smaller = zero(Int32)
+                end
+            elseif is_smaller > 0
+                smaller = smallnum
+                smallnum = magicints[smallidx + 1] >>> 1 % Int32
+            end
+            sizesmall = SA[magicints[smallidx + 1], magicints[smallidx + 1], magicints[smallidx + 1]]
+        end
+    end
+    return nothing      
+end
+
 
 function read_xtc_file(name)
     xtcfile = open(name, "r")
     index = read_xtc_headers(xtcfile)
     nframes = length(index.offsets)
     coordinates = Array{Float32}(undef, index.natoms, 3, nframes )
+    buffer = BitBuffer(Int(ceil(index.natoms * 4)))
     for i in 1:nframes
         #println(i)
         seek(xtcfile, index.offsets[i])
-        _, c = read_xtc_frame(xtcfile, index.natoms, magicints)
-        coordinates[:, :, i] = c 
-
+        read_xtc_frame(xtcfile, index.natoms, view(coordinates, :, :, i), magicints, buffer)
     end
     return coordinates
-        
-
 end
+
 
 
 
 #@code_warntype 
 #@time read_xtc_file("step5_2.xtc");
-@time cc=read_xtc_file("md_adam_g0_amber_rep1.xtc");
+# @time cc=read_xtc_file("md_adam_g0_amber_rep1.xtc");
 #cc=read_xtc_file("diala_nowat.xtc");
 
 #@time read_xtc_file("step5_2.xtc");
+
+xf = XtcFile("diala_nowat.xtc", "r")
