@@ -196,6 +196,7 @@ function test_send_receive_ints(size)
     rec = Libdl.dlsym(lib, :receiveints)
     send = Libdl.dlsym(lib, :sendints)
     sizes = @MVector UInt32[size, size, size]
+    isizes = @MVector [size, size, size]
     num_of_bits = sizeofints(sizes)
     start = 0
     stop = size-1
@@ -204,14 +205,14 @@ function test_send_receive_ints(size)
     words = cld(bytes, 4) + 3
     bj=BitBuffer(bytes)
     for i in start:step:stop
-        nums = @MVector Int32[i, i, stop - i]
-        sendints!(bj,num_of_bits, sizes, nums)
+        nums = @MVector [i, i, stop - i]
+        sendints!(bj, num_of_bits, isizes, nums)
     end
     reset!(bj)
     for i in start:step:stop
-        nums =  Int32[i, i, stop - i]
-        nums2 = MVector{3,Int32}(undef)
-        receiveints!(bj, num_of_bits, sizes, nums2)
+        nums =  [i, i, stop - i]
+        nums2 = MVector{3,Int}(undef)
+        receiveints!(bj, num_of_bits, isizes, nums2)
         result &= nums == nums2
         if nums != nums2 
             println(i, " ", nums, " ", nums2)
@@ -219,8 +220,8 @@ function test_send_receive_ints(size)
     end
     reset!(bj)
     for i in start:step:stop
-        nums = @MVector Int32[i, i, stop - i]
-        sendints!(bj,num_of_bits, sizes, nums)
+        nums = @MVector [i, i, stop - i]
+        sendints!(bj,num_of_bits, isizes, nums)
     end
     bc = Array{Cint}(undef, words)
     buffer2c!(bj, bc)
@@ -233,21 +234,22 @@ function test_send_receive_ints(size)
             println(i, " ", nums, " ", nums2)
         end
     end
-    # bc .= 0
-    # for i in start:step:stop
-    #     nums =  UInt32[i, i, stop - i]
-    #     ccall(send, Cvoid, (Ptr{Cint}, Cint, Cint, Ptr{Cuint}, Ptr{Cint}), bc, 3, num_of_bits, sizes, nums)
-    # end
-    # buffer2j!(bc, bj)
-    # for i in start:step:stop
-    #     nums =  Int32[i, i, stop - i]
-    #     nums2 = MVector{3,Int32}(undef)
-    #     receiveints!(bj, num_of_bits, sizes, nums2)
-    #     result &= nums == nums2
-    #     if nums != nums2 
-    #         println(i, " ", nums, " ", nums2)
-    #     end
-    # end
+    bc .= 0
+    for i in start:step:stop
+        nums =  UInt32[i, i, stop - i]
+        ccall(send, Cvoid, (Ptr{Cint}, Cint, Cint, Ptr{Cuint}, Ptr{Cint}), bc, 3, num_of_bits, sizes, nums)
+    end
+    buffer2j!(bc, bj)
+    reset!(bj)
+    for i in start:step:stop
+        nums = [i, i, stop - i]
+        nums2 = MVector{3,Int}(undef)
+        receiveints!(bj, num_of_bits, isizes, nums2)
+        result &= nums == nums2
+        if nums != nums2 
+            println(i, " ", nums, " ", nums2)
+        end
+    end
     return result
 end
 
@@ -352,7 +354,7 @@ end
     @test test_send_receive_ints(23)
     @test test_send_receive_ints(24)
 end
-# test_send_receive_ints(8)
+#test_send_receive_ints(8)
 
 Libdl.dlclose(lib)
 
