@@ -18,14 +18,9 @@ mutable struct XtcFile
     file::IOStream
     filename::AbstractString
     mode::AbstractString
-    # following are all buffers used for read write process
-    buffer::BitBuffer
     magicints::Vector{Int}
-    thiscoord::MVector{3, Int}
-    prevcoord::MVector{3, Int}
-    # relvant infos
-    natoms::Int32
-    nframes::Int32
+    natoms::Int
+    nframes::Int
     steps::Vector{Int32}
     offsets::Vector{UInt64}
     time::Vector{Float32}
@@ -35,13 +30,10 @@ mutable struct XtcFile
         magicints[1:9] .= 0
         if 'r' in mode || 'a' in mode
             stuff = read_xtc_headers(file)
-            buf = BitBuffer(stuff.natoms * 4)
-            XF = new(file, name, mode, buf, magicints, [Int32(0) for _ in 1:3], [Int32(0) for _ in 1:3],
-                     stuff.natoms, length(stuff.offsets), stuff.steps, stuff.offsets, stuff.times)
+            XF = new(file, name, mode, magicints, Int(stuff.natoms), length(stuff.offsets), 
+            stuff.steps, stuff.offsets, stuff.times)
         else
-            buf = BitBuffer(2^16)
-            XF = new(file, name, mode, buf, magicints, [Int32(0) for _ in 1:3], [Int32(0) for _ in 1:3],
-                     0, 0, Int32[], UInt64[], Float32[])
+            XF = new(file, name, mode, magicints, 0, 0, Int32[], UInt64[], Float32[])
         end
         closeme(xf) = close(xf.file)
         finalizer(closeme, XF)
@@ -127,7 +119,7 @@ function receivebits!(buffer::BitBuffer, nbits::Integer)::Int
 end
 
 function sendints!(buffer::BitBuffer, num_of_bits::Integer, sizes::AbstractVector{S}, nums::AbstractVector{T}) where {S,T <: Integer}
-    if num_of_bits > 63
+    if num_of_bits > 64
         result = Int128(nums[1])
         result *= sizes[2]
         result += nums[2]
@@ -222,61 +214,60 @@ function sendints!(buffer::BitBuffer, num_of_bits::Integer, sizes::AbstractVecto
 end
 
 function receiveints!(buffer::BitBuffer, num_of_bits::Integer, sizes::AbstractVector{S}, nums::AbstractVector{T}) where {S,T <: Integer}
-    if num_of_bits > 63
-        result = zero(Int128)
-
-    ones = typemax(typeof(result))
-    totbits = sizeof(result) * 8
-    freebits = totbits - num_of_bits
-    avail_in_first_byte = rem(8 - buffer.offset, 8)
-
-    # receive first bits 
-    if buffer.offset > 0   
-        result |= buffer.bits[buffer.index] & (0xff >>> buffer.offset)
+    if num_of_bits > 64 
+        result128 = zero(UInt128)
+        ones128 = typemax(typeof(result128)) 
+        totbits128 = sizeof(result128) * 8
+        freebits = totbits128 - num_of_bits
+        
+        firstbits128 = UInt128(buffer.bits[buffer.index]) << (buffer.offset + 120)
         buffer.index += 1
-        num_of_bits -= avail_in_first_byte
-    end
-
-    num_of_bytes = cld(num_of_bits, 8)
-    for _ in 1:num_of_bytes 
-        result <<= 8
-        result |= buffer.bits[buffer.index]
-        buffer.index += 1
-    end
-
-    # align right
-    result <<= ((sizeof(result) - num_of_bytes) * 8 - avail_in_first_byte) 
-
-    # clear trailing bits 
-    result &= (ones << freebits)
-
-    # do the trick
-    shiftbytes = cld(freebits, 8)
-    shiftbits = rem(freebits, 8)
-    rest = ones << (8 * shiftbytes)
-    part = ~ rest
-    result = (result & rest) | ((result & part) >>> shiftbits)
+        num_of_bits -= 8 - buffer.offset
+        new_offset = rem(num_of_bits, 8)
+        avail_in_last_byte = rem(8 - new_offset, 8)
     
-    result = bswap(result)
+        num_of_bytes = cld(num_of_bits, 8)
+        for _ in 1:num_of_bytes 
+            result128 <<= 8
+            result128 |= buffer.bits[buffer.index]
+            buffer.index += 1
+        end
 
-    nums[3] = rem(result, sizes[3])
-    result = div(result, sizes[3])
-    nums[2] = rem(result, sizes[2])
-    nums[1] = div(result, sizes[2])
+        # align left 
+        result128 >>>= avail_in_last_byte
+    
+        # align right
+        result128 <<= freebits
+
+        # insert first bits
+        result128 |= firstbits128
+    
+        # do the trick
+        shiftbytes = cld(freebits, 8)
+        shiftbits = rem(freebits, 8)
+        rest128 = ones128 << (8 * shiftbytes)
+        part128 = ~ rest128
+        result128 = (result128 & rest128) | ((result128 & part128) >>> shiftbits)
+        
+        result128 = bswap(result128)
+    
+        nums[3] = rem(result128, sizes[3])
+        result64 = div(result128, sizes[3]) % UInt64
+        nums[2] = rem(result64, sizes[2])
+        nums[1] = div(result64, sizes[2])
 
     else
-        result64 = 0
-        ones64 = typemax(typeof(result64))
+
+        result64 = zero(UInt64)
+        ones64 = typemax(typeof(result64)) 
         totbits64 = sizeof(result64) * 8
         freebits = totbits64 - num_of_bits
-        avail_in_first_byte = rem(8 - buffer.offset, 8)
-    
-        # receive first bits 
-        if buffer.offset > 0   
-            result64 |= buffer.bits[buffer.index] & (0xff >>> buffer.offset)
-            buffer.index += 1
-            num_of_bits -= avail_in_first_byte
-        end
+        
+        firstbits64 = UInt64(buffer.bits[buffer.index]) << (buffer.offset + 56)
+        buffer.index += 1
+        num_of_bits -= 8 - buffer.offset
+        new_offset = rem(num_of_bits, 8)
+        avail_in_last_byte = rem(8 - new_offset, 8)
     
         num_of_bytes = cld(num_of_bits, 8)
         for _ in 1:num_of_bytes 
@@ -284,12 +275,15 @@ function receiveints!(buffer::BitBuffer, num_of_bits::Integer, sizes::AbstractVe
             result64 |= buffer.bits[buffer.index]
             buffer.index += 1
         end
+
+        # align left 
+        result64 >>>= avail_in_last_byte
     
         # align right
-        result64 <<= ((sizeof(result64) - num_of_bytes) * 8 - avail_in_first_byte) 
-    
-        # clear trailing bits 
-        result64 &= (ones64 << freebits)
+        result64 <<= freebits
+
+        # insert first bits
+        result64 |= firstbits64
     
         # do the trick
         shiftbytes = cld(freebits, 8)
@@ -306,8 +300,7 @@ function receiveints!(buffer::BitBuffer, num_of_bits::Integer, sizes::AbstractVe
         nums[1] = div(result64, sizes[2])
 
     end
-
-    buffer.offset = rem(num_of_bits, 8)
+    buffer.offset = new_offset
     if buffer.offset > 0 
         buffer.index -= 1  # we need to reread the last byte
     end
@@ -390,6 +383,8 @@ function read_xtc_atoms(file::XtcFile, frame::Integer, coords::AbstractMatrix{T}
     local smaller::Int
     minint = MVector{3, Int32}(undef)
     maxint = MVector{3, Int32}(undef)
+    thiscoord = MVector{3, Int}(undef)
+    prevcoord = MVector{3, Int}(undef)
     magicints = file.magicints
     FIRSTINDEX = 9
     seek(file.file, file.offsets[frame] + 36) # we don't read box here
@@ -412,16 +407,12 @@ function read_xtc_atoms(file::XtcFile, frame::Integer, coords::AbstractMatrix{T}
         smallnum = magicints[smallidx + 1] >>> 1 
         sizesmall = SA[magicints[smallidx + 1], magicints[smallidx + 1], magicints[smallidx + 1]]
         nbytes = ntoh(read(file.file, Int32))
-        if length(file.buffer.bits) < nbytes
-            resize!(file.buffer.bits, nbytes)
-        end
-        file.buffer.index = 1
-        file.buffer.offset = 0
-        readbytes!(file.file, file.buffer.bits, nbytes)
+        buffer = BitBuffer(nbytes)
+        readbytes!(file.file, buffer.bits, nbytes)
         sizeint = SA[(maxint[1] - minint[1] + 1),
                     (maxint[2] - minint[2] + 1),
                     (maxint[3] - minint[3] + 1)]
-        if any( sizeint .> 0xffffff)
+        if any( sizeint .> 2^24-1)
             bitsizeint = sizeofint.(sizeint)
             bitsize = 0
         else    
@@ -432,49 +423,49 @@ function read_xtc_atoms(file::XtcFile, frame::Integer, coords::AbstractMatrix{T}
         while i <= file.natoms
             if bitsize == 0
                 for ii in 1:3
-                    file.thiscoord[ii] = receivebits!(file.buffer, bitsizeint[ii])
+                    thiscoord[ii] = receivebits!(buffer, bitsizeint[ii])
                 end
             else
-                receiveints!(file.buffer, bitsize, sizeint, file.thiscoord)
+                receiveints!(buffer, bitsize, sizeint, thiscoord)
             end
             for ii in 1:3
-                file.thiscoord[ii] += minint[ii]
+                thiscoord[ii] += minint[ii]
             end
-            flag = receivebits!(file.buffer, 1)
+            flag = receivebits!(buffer, 1)
             is_smaller = 0
             if flag == 1
-                run = receivebits!(file.buffer, 5)
+                run = receivebits!(buffer, 5)
                 is_smaller = run % 3
                 run -= is_smaller
                 is_smaller -= 1
             end
             if run == 0
                 for ii in 1:3
-                    coords[ii, i] = file.thiscoord[ii] / precision 
+                    coords[ii, i] = thiscoord[ii] / precision 
                 end
                 i += 1
             else
                 for ii in 1:3
-                    file.prevcoord[ii] = file.thiscoord[ii]
+                    prevcoord[ii] = thiscoord[ii]
                 end
                 for k in 1:3:run
-                    receiveints!(file.buffer, smallidx, sizesmall, file.thiscoord)
+                    receiveints!(buffer, smallidx, sizesmall, thiscoord)
                     for ii in 1:3
-                        file.thiscoord[ii] += file.prevcoord[ii] - smallnum # smallnum ??? WTF!!
+                        thiscoord[ii] += prevcoord[ii] - smallnum # smallnum ??? WTF!!
                     end
                     if k == 1 # exchange first with second atom WTF!!
-                        file.thiscoord, file.prevcoord = file.prevcoord, file.thiscoord
+                        thiscoord, prevcoord = prevcoord, thiscoord
                         for ii in 1:3
-                            coords[ii,i] = file.prevcoord[ii] / precision
+                            coords[ii,i] = prevcoord[ii] / precision
                         end
                         i += 1
                     else
                         for ii in 1:3
-                            file.prevcoord[ii] = file.thiscoord[ii]
+                            prevcoord[ii] = thiscoord[ii]
                         end
                     end
                     for ii in 1:3
-                        coords[ii,i] = file.thiscoord[ii] / precision
+                        coords[ii,i] = thiscoord[ii] / precision
                     end
                     i += 1
                 end
@@ -511,12 +502,13 @@ end
 
 #@code_warntype 
 #@time read_xtc_file("step5_2.xtc");
-#@time cc=read_xtc_file("md_adam_g0_amber_rep1.xtc");
+# stats=@timed cc=read_xtc_file("md_adam_g0_amber_rep1.xtc");
+# println(stats.time)
 #cc=read_xtc_file("diala_nowat.xtc");
 
-@time read_xtc_file("step5_2.xtc");
+#read_xtc_file("step5_2.xtc");
 
 # xf = XtcFile("diala_nowat.xtc", "r")
 # atoms = Matrix{Float32}(undef, 3, xf.natoms)
 # @code_warntype read_xtc_atoms(xf, 1, atoms)
-
+#@time cc=read_xtc_file("md_adam_g0_amber_rep1.xtc");

@@ -253,6 +253,69 @@ function test_send_receive_ints(size)
     return result
 end
 
+function test_send_receive_ints_(nb)
+    magicints = [Int(floor(2^i)) for i in 0:1//3:24]
+    ll = length(magicints)
+    list = []
+    for i in 1:ll
+        for j in 1:ll
+            for k in 1:ll
+                bits = sizeofints([magicints[i], magicints[j], magicints[k]])
+                if bits == nb
+                    push!(list, [magicints[i], magicints[j], magicints[k]])
+                end
+            end
+        end
+    end
+
+    result = true
+    rec = Libdl.dlsym(lib, :receiveints)
+    recb = Libdl.dlsym(lib, :receivebits)
+    send = Libdl.dlsym(lib, :sendints)
+    sizes = MVector{3,UInt32}(undef)
+    bits = 42
+    for isizes in list # [[16777215, 16777215, 100]] # [[3329020, 16777215, 511]] # 
+        for nbits in 1:8
+            for i in 1:3 sizes[i] = convert(UInt32, isizes[i]) end
+            num_of_bits = sizeofints(sizes)
+            if num_of_bits != 64
+                #println("num of bits $num_of_bits")
+            end
+            bytes = 32
+            words = cld(bytes, 4) + 3
+            bj=BitBuffer(bytes)
+            nums = MVector{3, Int32}(undef)
+            for i in 1:3 nums[i] = convert(UInt32, isizes[i] - 1) end
+            sendbits!(bj,bits,nbits)
+            sendints!(bj, num_of_bits, isizes, nums)
+            sendints!(bj, num_of_bits, isizes, nums)
+            reset!(bj)
+            bc = Array{Cint}(undef, words)
+            buffer2c!(bj, bc)
+            nums2 = Vector{Int32}(undef, 3)
+            bb=ccall(recb, Cint, (Ptr{Cint}, Cint), bc, nbits)
+            ccall(rec, Cvoid, (Ptr{Cint}, Cint, Cint, Ptr{Cuint}, Ptr{Cint}), bc, 3, num_of_bits, sizes, nums2)
+            ccall(rec, Cvoid, (Ptr{Cint}, Cint, Cint, Ptr{Cuint}, Ptr{Cint}), bc, 3, num_of_bits, sizes, nums2)
+            if nums != nums2 
+                println(" ", nums, " ", nums2)
+                result = false
+            end
+            nums3 = Vector{Int32}(undef, 3)
+            bb=receivebits!(bj,nbits)
+            # @code_warntype receiveints!(bj, num_of_bits, isizes, nums3)
+            receiveints!(bj, num_of_bits, isizes, nums3)
+            receiveints!(bj, num_of_bits, isizes, nums3)
+            if nums != nums3 
+                println(nbits, "-", nums, "-", nums3)
+                result = false
+            end
+        
+            reset!(bj)
+        end
+    end
+    return result
+end
+
 @testset "Buffer conversion" begin
     @test test_buffer_conversion(2^24)
     @test test_buffer_conversion(2^24+1)
@@ -334,28 +397,16 @@ end
     @test test_send_receive_bits()
 end
 
-@testset "sendints! and receiveints!" begin
+@testset "sendints! and receiveints!" for num in 8:24
     # 8 is the lowest limit in magicints
-    @test test_send_receive_ints(8)
-    @test test_send_receive_ints(9)
-    @test test_send_receive_ints(10)
-    @test test_send_receive_ints(11)
-    @test test_send_receive_ints(12)
-    @test test_send_receive_ints(13)
-    @test test_send_receive_ints(14)
-    @test test_send_receive_ints(15)
-    @test test_send_receive_ints(16)
-    @test test_send_receive_ints(17)
-    @test test_send_receive_ints(18)
-    @test test_send_receive_ints(19)
-    @test test_send_receive_ints(20)
-    @test test_send_receive_ints(21)
-    @test test_send_receive_ints(22)
-    @test test_send_receive_ints(23)
-    @test test_send_receive_ints(24)
+    @test test_send_receive_ints(num)
 end
-#test_send_receive_ints(8)
 
-Libdl.dlclose(lib)
+@testset "receiveints!" for nbits in 8:72
+
+    @test test_send_receive_ints_(nbits)
+end
+
+Libdl.dlclose(lib);
 
 
