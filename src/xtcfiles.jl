@@ -405,6 +405,9 @@ function write_xtc_frame(file::XtcFile, step::Integer, time::Real, box::Abstract
             write(file.file, hton(convert(Float32, box[i, j])))
         end
     end
+    if step == 0
+        @code_warntype write_xtc_atoms(file.file, 1000.0, coords)
+    end
     result = write_xtc_atoms(file.file, 1000.0, coords)
     flush(file.file)
 end
@@ -423,10 +426,9 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
     else
         minint = MVector{3, Int32}(undef)
         maxint = MVector{3, Int32}(undef)
-        prevcoord = @SVector [0, 0, 0]
-        tmp = MVector{3, Int}(undef)
+        prevcoord = @SVector Int32[0, 0, 0]
         tmpcoords = MMatrix{3, 10, Int}(undef)
-        intcoords = Vector{SVector{3, Int}}(undef, natoms)
+        intcoords = Vector{SVector{3, Int32}}(undef, natoms)
         buffer = BitBuffer(natoms * 15)
         write(file, hton(Float32(precision)))
         minint .= typemax(Int32)
@@ -440,7 +442,7 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
                 return false
                 # scaling would cause overflow 
             end
-            intcoords[atom] = @SVector [convert(Int, fc[i]) for i in 1:3]
+            intcoords[atom] = @SVector [convert(Int32, fc[i]) for i in 1:3]
             for ii in 1:3
                 minint[ii] = intcoords[atom][ii] < minint[ii] ? intcoords[atom][ii] : minint[ii]
                 maxint[ii] = intcoords[atom][ii] > maxint[ii] ? intcoords[atom][ii] : maxint[ii]
