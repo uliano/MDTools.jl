@@ -409,7 +409,6 @@ function write_xtc_frame(file::XtcFile, step::Integer, time::Real, box::Abstract
     flush(file.file)
 end
 
-
 function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix{T}) where {T <: Real}
     pos = position(file)
     natoms = size(coords)[2]
@@ -424,10 +423,10 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
     else
         minint = MVector{3, Int32}(undef)
         maxint = MVector{3, Int32}(undef)
-        prevcoord = @MVector Int[0, 0, 0]
+        prevcoord = @SVector [0, 0, 0]
         tmp = MVector{3, Int}(undef)
         tmpcoords = MMatrix{3, 10, Int}(undef)
-        intcoords = Matrix{Int}(undef, 3, natoms)
+        intcoords = Vector{SVector{3, Int}}(undef, natoms)
         buffer = BitBuffer(natoms * 15)
         write(file, hton(Float32(precision)))
         minint .= typemax(Int32)
@@ -435,23 +434,24 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
         mindiff = typemax(Int32)
         prevrun = -1
         for atom in 1:natoms
-            fc = @SVector Float32[round(coords[i, atom] * precision) for i in 1:3]
+            fc = ntuple(i->Float32(round(coords[i, atom] * precision)), 3)
             if any(fc .> max_absolute_int )
                 seek(file, pos)
                 return false
                 # scaling would cause overflow 
             end
+            intcoords[atom] = @SVector [convert(Int, fc[i]) for i in 1:3]
             for ii in 1:3
-                intcoords[ii, atom] = convert(Int, fc[ii])
-                minint[ii] = intcoords[ii, atom] < minint[ii] ? intcoords[ii, atom] : minint[ii]
-                maxint[ii] = intcoords[ii, atom] > maxint[ii] ? intcoords[ii, atom] : maxint[ii]
-                tmp[ii] = prevcoord[ii] - intcoords[ii, atom]
+                minint[ii] = intcoords[atom][ii] < minint[ii] ? intcoords[atom][ii] : minint[ii]
+                maxint[ii] = intcoords[atom][ii] > maxint[ii] ? intcoords[atom][ii] : maxint[ii]
             end
-            diff = norm(tmp, 1)
+            # minint .= ifelse.(intcoords[atom] .< minint, intcoords[atom], minint)
+            # maxint .= ifelse.(intcoords[atom] .> minint, intcoords[atom], maxint)
+            diff = sum(abs.(prevcoord-intcoords[atom]))
             if diff < mindiff && atom > 1
                 mindiff = diff
             end
-            prevcoord .= view(intcoords, :, atom)
+            prevcoord = intcoords[atom]
         end
         for ii in 1:3
             write(file, hton(minint[ii]))
@@ -464,10 +464,8 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
             return false
             # turning values to unsigned would cause overflow
         end
-        sizeint = SA[maxint[1] - minint[1] + 1,
-                     maxint[2] - minint[2] + 1,
-                     maxint[3] - minint[3] + 1]
-        if any( sizeint .> 2^24-1)
+        sizeint = @SVector [maxint[i] - minint[i] + 1 for i in 1:3]
+        if any(sizeint .> 2^24-1)
             bitsizeint = sizeofint.(sizeint)
             bitsize = 0
         else    
@@ -487,12 +485,8 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
         atom = 1
         while atom <= natoms
             is_small = 0
-
             # if smallidx < maxidx && atom > 1 && all(abs.(view(intcoords, :, atom) .- view(intcoords, :, prev_atom)) .< larger)
-            if smallidx < maxidx && atom > 1 && 
-               abs(intcoords[1, atom] - intcoords[1, prev_atom]) < larger &&
-               abs(intcoords[2, atom] - intcoords[2, prev_atom]) < larger &&
-               abs(intcoords[3, atom] - intcoords[3, prev_atom]) < larger
+            if smallidx < maxidx && atom > 1 && all(abs.(intcoords[atom] - intcoords[prev_atom]) .< larger)
                 is_smaller = 1
             elseif smallidx > minidx
                 is_smaller = -1
@@ -500,20 +494,12 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
                 is_smaller = 0
             end
             # can we swap? should we swap?
-
-            # if atom + 1 <= natoms && all(abs.(view(intcoords, :, atom) .- view(intcoords, :, atom + 1)) .< smallnum)
-            tmp .= abs.(view(intcoords, :, atom) .- view(intcoords, :, atom + 1))
-            if atom + 1 <= natoms && tmp[1] < smallnum && tmp[2] < smallnum && tmp[3] < smallnum
-
-                # this was kinda shot in the dark, breaks functionality.
-                # intcoords[:, atom], intcoords[:, atom + 1] = view(intcoords, :, atom + 1), view(intcoords, :, atom)
-                tmp .= view(intcoords, :, atom)
-                intcoords[:, atom] .= view(intcoords, :, atom + 1)
-                intcoords[:, atom + 1] .= tmp
+            if atom + 1 <= natoms && all(abs.(intcoords[atom] - intcoords[atom + 1]) .< smallnum)
+                intcoords[atom], intcoords[atom + 1] = intcoords[atom + 1], intcoords[atom]
                 is_small = 1
             end
 
-            tmp .= view(intcoords, :, atom) .- minint
+            tmp = intcoords[atom] - minint
 
             if bitsize == 0
                 for ii in 1:3
@@ -529,29 +515,15 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
                 is_smaller = 0
             end
             while is_small != 0 && run <= 8
-
-                # if is_smaller == -1 && norm(view(intcoords, :, atom) - view(intcoords, :, prev_atom)) >= smaller
-                tmp .= view(intcoords, :, atom) .- view(intcoords, :, prev_atom)
-                if is_smaller == -1 && norm(tmp) >= smaller
+                if is_smaller == -1 && norm(intcoords[atom] - intcoords[prev_atom]) >= smaller
                     is_smaller = 0
                 end
-                tmpcoords[:, run] .= view(intcoords, :, atom) .- view(intcoords, :, prev_atom) .+ smallnum
+                tmpcoords[:, run] .= intcoords[atom] .- intcoords[prev_atom] .+ smallnum
                 run += 1
                 prev_atom = atom
                 atom += 1
                 is_small = 0
-
-                # if atom <= natoms && all(abs.(view(intcoords, :, atom) .- view(intcoords, :, prev_atom)) .< smallnum)
-            
-                # this doesn't work (breaks functionality, why???)
-                # tmp .= abs.(view(intcoords, :, atom) .- view(intcoords, :, prev_atom)) .< smallnum
-                # if atom <= natoms && tmp[1] < smallnum && tmp[2] < smallnum && tmp[3] < smallnum
-
-                if atom <= natoms &&
-                   abs(intcoords[1, atom] - intcoords[1, prev_atom]) < smallnum &&
-                   abs(intcoords[2, atom] - intcoords[2, prev_atom]) < smallnum &&
-                   abs(intcoords[3, atom] - intcoords[3, prev_atom]) < smallnum
-
+                if atom <= natoms && all(abs.(intcoords[atom] - intcoords[prev_atom]) .< smallnum)
                     is_small = 1
                 end
             end
@@ -594,10 +566,6 @@ function read_xtc_atoms(file::XtcFile, frame::Integer, coords::AbstractMatrix{T}
     maxint = MVector{3, Int32}(undef)
     thiscoord = MVector{3, Int}(undef)
     prevcoord = MVector{3, Int}(undef)
-    # minint = Vector{Int32}(undef, 3)
-    # maxint = Vector{Int32}(undef, 3)
-    # thiscoord = Vector{Int}(undef, 3)
-    # prevcoord = Vector{Int}(undef, 3)
     FIRSTINDEX = 9
     seek(file.file, file.offsets[frame] + 36) # we don't read box here
     size = ntoh(read(file.file, Int32))
