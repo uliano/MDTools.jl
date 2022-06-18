@@ -1,13 +1,11 @@
 import Base: show, length, write
 using StaticArrays
 using LinearAlgebra
-#using OffsetArrays
 
 const magicints = [i < 3 ? 0 : Int(floor(2^i)) for i in 0:1//3:24]
 const FIRSTINDEX = 9
 const LASTIDX = length(magicints)
 const max_absolute_int = prevfloat(convert(Float32, typemax(Int32)))
-
 
 mutable struct BitBuffer
     bits::Vector{UInt8}  # the bytes
@@ -405,9 +403,9 @@ function write_xtc_frame(file::XtcFile, step::Integer, time::Real, box::Abstract
             write(file.file, hton(convert(Float32, box[i, j])))
         end
     end
-    if step == 0
-        @code_warntype write_xtc_atoms(file.file, 1000.0, coords)
-    end
+    # if step == 0
+    #     @code_warntype write_xtc_atoms(file.file, 1000.0, coords)
+    # end
     result = write_xtc_atoms(file.file, 1000.0, coords)
     flush(file.file)
 end
@@ -439,16 +437,11 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
             fc = ntuple(i->Float32(round(coords[i, atom] * precision)), 3)
             if any(fc .> max_absolute_int )
                 seek(file, pos)
-                return false
-                # scaling would cause overflow 
+                return false # scaling would cause overflow 
             end
             intcoords[atom] = @SVector [convert(Int32, fc[i]) for i in 1:3]
-            for ii in 1:3
-                minint[ii] = intcoords[atom][ii] < minint[ii] ? intcoords[atom][ii] : minint[ii]
-                maxint[ii] = intcoords[atom][ii] > maxint[ii] ? intcoords[atom][ii] : maxint[ii]
-            end
-            # minint .= ifelse.(intcoords[atom] .< minint, intcoords[atom], minint)
-            # maxint .= ifelse.(intcoords[atom] .> minint, intcoords[atom], maxint)
+            minint .= ifelse.(intcoords[atom] .< minint, intcoords[atom], minint)
+            maxint .= ifelse.(intcoords[atom] .> maxint, intcoords[atom], maxint)
             diff = sum(abs.(prevcoord-intcoords[atom]))
             if diff < mindiff && atom > 1
                 mindiff = diff
@@ -463,8 +456,7 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
         end
         if any(convert.(Float32, maxint - minint) .>= max_absolute_int)
             seek(file, pos)
-            return false
-            # turning values to unsigned would cause overflow
+            return false # turning values to unsigned would cause overflow
         end
         sizeint = @SVector [maxint[i] - minint[i] + 1 for i in 1:3]
         if any(sizeint .> 2^24-1)
@@ -487,7 +479,6 @@ function write_xtc_atoms(file::IOStream, precision::Real, coords::AbstractMatrix
         atom = 1
         while atom <= natoms
             is_small = 0
-            # if smallidx < maxidx && atom > 1 && all(abs.(view(intcoords, :, atom) .- view(intcoords, :, prev_atom)) .< larger)
             if smallidx < maxidx && atom > 1 && all(abs.(intcoords[atom] - intcoords[prev_atom]) .< larger)
                 is_smaller = 1
             elseif smallidx > minidx
